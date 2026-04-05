@@ -1,0 +1,188 @@
+import PDFDocument from "pdfkit";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import Affectation from "../models/affectationModel.js";
+
+// ===== ESM FIX =====
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// ===== CONTROLLER =====
+export const generateAffectationPdf = async (req, res) => {
+  try {
+    const { employeeId } = req.params;
+
+    // 1️⃣ Get all affectations for ONE employee
+    const affectations = await Affectation.find({ employeeId })
+      .populate("employeeId")
+      .populate("deviceId");
+
+    if (!affectations.length) {
+      return res.status(404).json({ message: "No affectation found" });
+    }
+
+    const employee = affectations[0].employeeId;
+
+    // 2️⃣ Find last user who assigned / reassigned
+    let lastUser = "N/A";
+    affectations.forEach((a) => {
+      a.history.forEach((h) => {
+        if (["assign", "reassign"].includes(h.action)) {
+          lastUser = h.user;
+        }
+      });
+    });
+
+    // 3️⃣ Prepare folders
+    const pdfDir = path.join(__dirname, "../pdfs");
+    if (!fs.existsSync(pdfDir)) fs.mkdirSync(pdfDir);
+
+    const fileName = `affectation_${employee.matricule}.pdf`;
+    const filePath = path.join(pdfDir, fileName);
+
+    // 4️⃣ Create PDF
+    const doc = new PDFDocument({ margin: 50 });
+    const stream = fs.createWriteStream(filePath);
+    doc.pipe(stream);
+
+    // ===== LOGO =====
+    const logoPath = path.join(__dirname, "../assets/lg.png");
+    console.log("LOGO PATH:", logoPath);
+    console.log("LOGO EXISTS:", fs.existsSync(logoPath));
+    if (fs.existsSync(logoPath)) {
+      doc.image(logoPath, 10, 10, { width: 600 }); //doc.image(logoPath, right left 10, up down 10, { width: 600 })
+    }
+
+    // ===== HEADER =====
+    const fontPath = path.join(__dirname, "../fonts");
+    console.log("FONT DIR EXISTS:", fs.existsSync(fontPath));
+
+    doc.registerFont(
+      "BoldItalic",
+      path.join(fontPath, "Roboto-BoldItalic.ttf")
+    );
+    doc.registerFont(
+      "Roboto_Condensed-Italic",
+      path.join(fontPath, "Roboto_Condensed-Italic.ttf")
+    );
+
+    doc.font("BoldItalic").fontSize(14).text("DIRECTION GÉNÉRALE", 20, 120);
+    doc
+      .font("BoldItalic")
+      .fontSize(12)
+      .text(`Biskra, le : ${new Date().toLocaleDateString()}`, 400, 120);
+    doc.fontSize(14).text("Structure IT", 20, 135);
+    doc.fontSize(36).text("DECHARGE", 220, 170).moveDown();
+
+    doc
+      .font("Roboto_Condensed-Italic")
+      .fontSize(15)
+      .text(
+        `Je soussigné M. :  ${employee.firstName}  ${employee.lastName} - ${employee.matricule}`,
+        20,
+        220
+      );
+    doc
+      .fontSize(15)
+      .text("Déclare avoir reçu de la part de Mr. ", { continued: true });
+
+    doc
+      .font("BoldItalic")
+      .fontSize(15)
+      .text("ADEL BENMEHAIAOUI ", { continued: true });
+
+    doc
+      .font("Roboto_Condensed-Italic")
+      .fontSize(15)
+      .text("(Responsable de la structure IT) les articles cités ci-dessous :");
+    doc.moveDown(2);
+
+    // ===== TABLE HEADER =====
+
+    const assignedDevices = affectations.filter(
+      (a) => a.status?.toLowerCase() === "assigned"
+    );
+
+    const groupedDevices = assignedDevices.reduce((acc, a) => {
+      const deviceId = a.deviceId?._id?.toString() || a.deviceId;
+
+      if (!acc[deviceId]) {
+        acc[deviceId] = {
+          name: a.deviceName,
+          quantity: 1,
+          remark: a.status,
+        };
+      } else {
+        acc[deviceId].quantity += 1;
+      }
+
+      return acc;
+    }, {});
+
+    const tableTop = doc.y;
+    const col0 = 40; // N°
+    const col1 = 80; // Name
+    const col2 = 300; // Quantity
+    const col3 = 400; // Remark
+
+    // ===== TABLE HEADER =====
+    doc
+      .font("BoldItalic")
+      .fontSize(12)
+      .text("N°", col0, tableTop)
+      .text("Objet / Désignation", col1, tableTop)
+      .text("Quantité", col2, tableTop)
+      .text("Remarque", col3, tableTop);
+
+    doc.moveDown(0.5);
+    doc.moveTo(30, doc.y).lineTo(550, doc.y).stroke();
+    doc.moveDown(0.5)
+
+    // ===== TABLE BODY =====
+    const deviceRows = Object.values(groupedDevices);
+
+    deviceRows.forEach((d, index) => {
+      const y = doc.y;
+
+      doc.text(index + 1, col0, y);
+      doc.text(d.name, col1, y);
+      doc.text(d.quantity.toString(), col2, y);
+      doc.text(d.remark, col3, y);
+
+      doc.moveDown(1);
+    });
+
+    // ===== FOOTER =====
+    const logo2Path = path.join(__dirname, "../assets/lg2.png");
+    if (fs.existsSync(logo2Path)) {
+      doc.image(logo2Path, 10, 700, { width: 600 }); //doc.image(logoPath, right left 10, up down 10, { width: 600 })
+    }
+    doc.moveDown(7);
+    doc.text("Réception le :", 400, 620);
+    doc.text("Par M. :", 400, 640);
+
+    doc.moveDown(2);
+    doc.text("___________________", 50, 650);
+    doc.fontSize(10).text(`Generated By  : ${lastUser}`, 50, 650);
+
+    /*doc
+      .fontSize(9)
+      .text(
+        "This document is system-generated and valid without stamp.",
+        50,
+        700,
+        { align: "center" }
+      );*/
+
+    // ===== FINALIZE =====
+    doc.end();
+
+    stream.on("finish", () => {
+      res.download(filePath, fileName);
+    });
+  } catch (error) {
+    console.error("PDF ERROR:", error);
+    res.status(500).json({ message: "PDF generation failed" });
+  }
+};
